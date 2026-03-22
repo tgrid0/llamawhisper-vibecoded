@@ -1,6 +1,9 @@
 import json
 import os
+import sys
+import platform
 import zipfile
+import tarfile
 import urllib.request
 import shutil
 import threading
@@ -24,28 +27,67 @@ APP_DIR = Path(__file__).parent
 CONFIG_FILE = APP_DIR / "config.json"
 MODELS_DIR = APP_DIR / "models"
 
-DEFAULT_CONFIG = {
-    "whisper": {
-        "url": "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-cublas-11.8.0-bin-x64.zip",
-        "version": "v1.8.4-cublas-11.8.0",
-    },
-    "llamacpp": {
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b8468/llama-b8468-bin-win-vulkan-x64.zip",
-        "version": "b8468",
-    },
-    "models": {
-        "llm": {
-            "url": "https://huggingface.co/lmstudio-community/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf?download=true",
-            "name": "Qwen3.5-9B-Q4_K_M.gguf",
-            "display_name": "lmstudio-community/Qwen3.5-9B-GGUF",
-        },
-        "whisper": {
-            "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin?download=true",
-            "name": "ggml-medium.bin",
-            "display_name": "ggerganov/whisper.cpp",
-        },
-    },
-}
+IS_MACOS = sys.platform == "darwin"
+IS_WINDOWS = sys.platform == "win32"
+MACOS_ARCH = platform.machine()  # "arm64" or "x86_64"
+
+
+def _exe(name):
+    """Return platform-appropriate binary name."""
+    return name + (".exe" if IS_WINDOWS else "")
+
+
+def _make_default_config():
+    if IS_MACOS:
+        macos_arch = "arm64" if MACOS_ARCH == "arm64" else "x64"
+        return {
+            "whisper": {
+                "url": "",
+                "version": "v1.8.4",
+            },
+            "llamacpp": {
+                "url": f"https://github.com/ggml-org/llama.cpp/releases/download/b8468/llama-b8468-bin-macos-{macos_arch}.tar.gz",
+                "version": "b8468",
+            },
+            "models": {
+                "llm": {
+                    "url": "https://huggingface.co/lmstudio-community/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf?download=true",
+                    "name": "Qwen3.5-9B-Q4_K_M.gguf",
+                    "display_name": "lmstudio-community/Qwen3.5-9B-GGUF",
+                },
+                "whisper": {
+                    "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin?download=true",
+                    "name": "ggml-medium.bin",
+                    "display_name": "ggerganov/whisper.cpp",
+                },
+            },
+        }
+    else:
+        return {
+            "whisper": {
+                "url": "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-cublas-11.8.0-bin-x64.zip",
+                "version": "v1.8.4-cublas-11.8.0",
+            },
+            "llamacpp": {
+                "url": "https://github.com/ggml-org/llama.cpp/releases/download/b8468/llama-b8468-bin-win-vulkan-x64.zip",
+                "version": "b8468",
+            },
+            "models": {
+                "llm": {
+                    "url": "https://huggingface.co/lmstudio-community/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf?download=true",
+                    "name": "Qwen3.5-9B-Q4_K_M.gguf",
+                    "display_name": "lmstudio-community/Qwen3.5-9B-GGUF",
+                },
+                "whisper": {
+                    "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin?download=true",
+                    "name": "ggml-medium.bin",
+                    "display_name": "ggerganov/whisper.cpp",
+                },
+            },
+        }
+
+
+DEFAULT_CONFIG = _make_default_config()
 
 
 class StatusApp:
@@ -164,6 +206,8 @@ class StatusApp:
             label.config(text=status, fg="orange")
         elif status == "Unpacking":
             label.config(text=status, fg="orange")
+        elif status == "Building":
+            label.config(text=status, fg="orange")
         else:
             label.config(text=status)
 
@@ -176,13 +220,13 @@ class StatusApp:
     def check_whisper(self):
         if not self.whisper_exe_dir.exists():
             return False
-        exe_path = self.whisper_exe_dir / "whisper-cli.exe"
+        exe_path = self.whisper_exe_dir / _exe("whisper-cli")
         return exe_path.exists()
 
     def check_llamacpp(self):
         if not self.llamacpp_exe_dir.exists():
             return False
-        exe_path = self.llamacpp_exe_dir / "llama-cli.exe"
+        exe_path = self.llamacpp_exe_dir / _exe("llama-cli")
         return exe_path.exists()
 
     def check_llm_model(self):
@@ -235,17 +279,33 @@ class StatusApp:
             component_completed = component_total / total * 100
 
             if component == "whisper":
-                self.update_status(self.whisper_label, "Downloading")
-                self.set_progress(component_completed, f"Downloading whisper.cpp...")
-                try:
-                    self._download_whisper(self.set_progress)
-                    self.update_status(self.whisper_label, "Unpacking")
-                    self.set_progress(component_completed, "Unpacking whisper.cpp...")
-                    self._unpack_whisper()
-                    self.update_status(self.whisper_label, "Ready")
-                except Exception as e:
-                    self.update_status(self.whisper_label, "Error")
-                    self.progress_var.set(f"Error: {e}")
+                if IS_MACOS:
+                    self.update_status(self.whisper_label, "Building")
+                    self.set_progress(
+                        component_completed, "Building whisper.cpp from source..."
+                    )
+                    try:
+                        self._build_whisper_macos()
+                        self.update_status(self.whisper_label, "Ready")
+                    except Exception as e:
+                        self.update_status(self.whisper_label, "Error")
+                        self.progress_var.set(f"Error: {e}")
+                else:
+                    self.update_status(self.whisper_label, "Downloading")
+                    self.set_progress(
+                        component_completed, f"Downloading whisper.cpp..."
+                    )
+                    try:
+                        self._download_whisper(self.set_progress)
+                        self.update_status(self.whisper_label, "Unpacking")
+                        self.set_progress(
+                            component_completed, "Unpacking whisper.cpp..."
+                        )
+                        self._unpack_whisper()
+                        self.update_status(self.whisper_label, "Ready")
+                    except Exception as e:
+                        self.update_status(self.whisper_label, "Error")
+                        self.progress_var.set(f"Error: {e}")
 
             elif component == "llamacpp":
                 self.update_status(self.llamacpp_label, "Downloading")
@@ -289,7 +349,12 @@ class StatusApp:
         self.set_progress(100, "All downloads complete!")
         self.root.after(500, lambda: self.check_dependencies())
 
+    # ------------------------------------------------------------------ #
+    #  whisper.cpp — Windows: download zip  /  macOS: build from source   #
+    # ------------------------------------------------------------------ #
+
     def _download_whisper(self, progress_callback):
+        """Windows only: download the prebuilt whisper.cpp zip."""
         zip_path = APP_DIR / "whisper" / "whisper-bin-x64.zip"
         (APP_DIR / "whisper").mkdir(parents=True, exist_ok=True)
         self._urlretrieve_with_progress(
@@ -297,6 +362,7 @@ class StatusApp:
         )
 
     def _unpack_whisper(self):
+        """Windows only: unpack the downloaded whisper.cpp zip."""
         zip_path = APP_DIR / "whisper" / "whisper-bin-x64.zip"
         whisper_dir = APP_DIR / "whisper"
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
@@ -319,24 +385,208 @@ class StatusApp:
 
         os.remove(zip_path)
 
+    def _check_macos_prerequisites(self):
+        """Raise RuntimeError if cmake or git are not available on macOS."""
+        missing = []
+        for tool in ("cmake", "git"):
+            try:
+                subprocess.run(
+                    [tool, "--version"],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                missing.append(tool)
+        if missing:
+            tools_str = " and ".join(missing)
+            raise RuntimeError(
+                f"{tools_str} not found. "
+                "Please install Xcode Command Line Tools (`xcode-select --install`) "
+                "or Homebrew with `brew install cmake git`, then try again."
+            )
+
+    def _build_whisper_macos(self):
+        """
+        macOS only: download whisper.cpp source, build whisper-cli with cmake,
+        install the binary to the version directory, and stream build output
+        to the progress label so the user can see what is happening.
+        """
+        self._check_macos_prerequisites()
+
+        version = self.whisper_config["version"]  # e.g. "v1.8.4"
+        src_url = f"https://github.com/ggml-org/whisper.cpp/archive/refs/tags/{version}.tar.gz"
+        whisper_dir = APP_DIR / "whisper"
+        src_dir = whisper_dir / "_src"
+        version_dir = whisper_dir / version
+
+        whisper_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- 1. Download source tarball ---
+        src_tarball = whisper_dir / f"whisper-{version}-src.tar.gz"
+        self.set_progress(5, f"Downloading whisper.cpp {version} source...")
+        self._urlretrieve_with_progress(src_url, src_tarball, self.set_progress)
+
+        # --- 2. Extract source ---
+        self.set_progress(15, "Extracting whisper.cpp source...")
+        if src_dir.exists():
+            shutil.rmtree(src_dir)
+        src_dir.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(src_tarball, "r:gz") as tf:
+            tf.extractall(src_dir)
+        os.remove(src_tarball)
+
+        # The tarball extracts to a single top-level directory like
+        # whisper.cpp-1.8.4/ (without the leading "v")
+        inner_name = f"whisper.cpp-{version.lstrip('v')}"
+        build_root = src_dir / inner_name
+        if not build_root.exists():
+            # Fallback: find whatever single directory was extracted
+            subdirs = [p for p in src_dir.iterdir() if p.is_dir()]
+            if len(subdirs) == 1:
+                build_root = subdirs[0]
+            else:
+                raise RuntimeError(
+                    f"Unexpected source layout after extraction: {list(src_dir.iterdir())}"
+                )
+
+        build_dir = build_root / "build"
+
+        # --- 3. cmake configure ---
+        self.set_progress(20, "Configuring whisper.cpp (cmake)...")
+        self._run_subprocess_logged(
+            [
+                "cmake",
+                "-B",
+                str(build_dir),
+                "-S",
+                str(build_root),
+                "-DGGML_METAL=ON",
+                "-DBUILD_SHARED_LIBS=OFF",
+                "-DCMAKE_BUILD_TYPE=Release",
+            ],
+            cwd=str(build_root),
+            progress_start=20,
+            progress_end=30,
+        )
+
+        # --- 4. cmake build ---
+        cpu_count = str(os.cpu_count() or 4)
+        self.set_progress(30, "Building whisper-cli (this may take a few minutes)...")
+        self._run_subprocess_logged(
+            [
+                "cmake",
+                "--build",
+                str(build_dir),
+                "--config",
+                "Release",
+                "--target",
+                "whisper-cli",
+                "-j",
+                cpu_count,
+            ],
+            cwd=str(build_root),
+            progress_start=30,
+            progress_end=90,
+        )
+
+        # --- 5. Install binary ---
+        self.set_progress(90, "Installing whisper-cli...")
+        built_binary = build_dir / "bin" / "whisper-cli"
+        if not built_binary.exists():
+            # Some cmake configurations put it directly in build/
+            built_binary = build_dir / "whisper-cli"
+        if not built_binary.exists():
+            raise RuntimeError(
+                f"Build completed but whisper-cli not found. "
+                f"Searched: {build_dir / 'bin' / 'whisper-cli'} and {build_dir / 'whisper-cli'}"
+            )
+
+        version_dir.mkdir(parents=True, exist_ok=True)
+        dest = version_dir / "whisper-cli"
+        shutil.copy2(str(built_binary), str(dest))
+        os.chmod(dest, 0o755)
+
+        # --- 6. Cleanup source ---
+        shutil.rmtree(src_dir)
+        self.set_progress(95, "whisper-cli built successfully.")
+
+    def _run_subprocess_logged(self, cmd, cwd, progress_start, progress_end):
+        """
+        Run a subprocess, stream its combined stdout/stderr to the progress
+        label, and interpolate progress_bar between progress_start and
+        progress_end.  Raises RuntimeError on non-zero exit.
+        """
+        process = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        lines_seen = 0
+        # We don't know total lines, so we drift the progress bar slowly
+        # toward progress_end as output accumulates.
+        for line in iter(process.stdout.readline, ""):
+            line = line.rstrip()
+            if line:
+                lines_seen += 1
+                # Asymptotically approach progress_end
+                span = progress_end - progress_start
+                current = progress_end - span / (1 + lines_seen / 10)
+                self.set_progress(current, line[:120])
+        process.stdout.close()
+        rc = process.wait()
+        if rc != 0:
+            raise RuntimeError(
+                f"Command failed (exit {rc}): {' '.join(str(c) for c in cmd)}"
+            )
+
+    # ------------------------------------------------------------------ #
+    #  llama.cpp — Windows: zip  /  macOS: tar.gz                         #
+    # ------------------------------------------------------------------ #
+
+    def _llamacpp_archive_name(self):
+        """Return the expected archive filename for the current platform."""
+        url = self.llamacpp_config["url"]
+        return Path(url).name  # e.g. "llama-b8468-bin-win-vulkan-x64.zip"
+        #   or "llama-b8468-bin-macos-arm64.tar.gz"
+
     def _download_llamacpp(self, progress_callback):
-        zip_path = APP_DIR / "llamacpp" / "llama-b8468-bin-win-vulkan-x64.zip"
+        archive_name = self._llamacpp_archive_name()
+        archive_path = APP_DIR / "llamacpp" / archive_name
         (APP_DIR / "llamacpp").mkdir(parents=True, exist_ok=True)
         self._urlretrieve_with_progress(
-            self.llamacpp_config["url"], zip_path, progress_callback
+            self.llamacpp_config["url"], archive_path, progress_callback
         )
 
     def _unpack_llamacpp(self):
-        zip_path = APP_DIR / "llamacpp" / "llama-b8468-bin-win-vulkan-x64.zip"
+        archive_name = self._llamacpp_archive_name()
+        archive_path = APP_DIR / "llamacpp" / archive_name
         llamacpp_dir = APP_DIR / "llamacpp"
         version_dir = llamacpp_dir / self.llamacpp_config["version"]
         version_dir.mkdir(parents=True, exist_ok=True)
 
+        if IS_MACOS:
+            self._unpack_llamacpp_targz(
+                archive_path, llamacpp_dir, version_dir, archive_name
+            )
+        else:
+            self._unpack_llamacpp_zip(
+                archive_path, llamacpp_dir, version_dir, archive_name
+            )
+
+        os.remove(archive_path)
+
+    def _unpack_llamacpp_zip(self, zip_path, llamacpp_dir, version_dir, zip_name):
+        """Windows: extract zip, flatten everything into version_dir."""
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(llamacpp_dir)
 
         for item in list(llamacpp_dir.iterdir()):
-            if item.is_file() and item.name != "llama-b8468-bin-win-vulkan-x64.zip":
+            if item.is_file() and item.name != zip_name:
                 dest = version_dir / item.name
                 shutil.move(str(item), str(dest))
             elif item.is_dir() and item.name != self.llamacpp_config["version"]:
@@ -350,7 +600,36 @@ class StatusApp:
                     shutil.move(str(subitem), str(dest))
                 item.rmdir()
 
-        os.remove(zip_path)
+    def _unpack_llamacpp_targz(self, tar_path, llamacpp_dir, version_dir, tar_name):
+        """
+        macOS: extract tar.gz.  The llama.cpp macOS release tarballs contain
+        all binaries flat at the top level (no wrapper directory).
+        After extraction, chmod the CLI binary executable.
+        """
+        with tarfile.open(tar_path, "r:gz") as tf:
+            tf.extractall(llamacpp_dir)
+
+        # Move any files/dirs that landed in llamacpp_dir (not the archive
+        # itself and not the version dir) into version_dir.
+        for item in list(llamacpp_dir.iterdir()):
+            if item.name == tar_name or item.name == self.llamacpp_config["version"]:
+                continue
+            dest = version_dir / item.name
+            if dest.exists():
+                if item.is_dir():
+                    shutil.rmtree(dest)
+                else:
+                    dest.unlink()
+            shutil.move(str(item), str(dest))
+
+        # Ensure the CLI binary is executable
+        cli = version_dir / "llama-cli"
+        if cli.exists():
+            os.chmod(cli, 0o755)
+
+    # ------------------------------------------------------------------ #
+    #  Model downloads (platform-neutral)                                  #
+    # ------------------------------------------------------------------ #
 
     def _download_llm_model(self, progress_callback):
         MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -500,11 +779,11 @@ class StatusApp:
             self.log("Please select an audio file first", "error")
             return
 
-        whisper_exe = self.whisper_exe_dir / "whisper-cli.exe"
+        whisper_exe = self.whisper_exe_dir / _exe("whisper-cli")
         whisper_model = MODELS_DIR / self.whisper_model_config["name"]
 
         if not whisper_exe.exists():
-            self.log(f"whisper-cli.exe not found at {whisper_exe}", "error")
+            self.log(f"{_exe('whisper-cli')} not found at {whisper_exe}", "error")
             return
         if not whisper_model.exists():
             self.log(f"Whisper model not found at {whisper_model}", "error")
@@ -581,11 +860,11 @@ class StatusApp:
             self.log("Please select a text file first", "error")
             return
 
-        llama_exe = self.llamacpp_exe_dir / "llama-cli.exe"
+        llama_exe = self.llamacpp_exe_dir / _exe("llama-cli")
         llm_model = MODELS_DIR / self.llm_config["name"]
 
         if not llama_exe.exists():
-            self.log(f"llama-cli.exe not found at {llama_exe}", "error")
+            self.log(f"{_exe('llama-cli')} not found at {llama_exe}", "error")
             return
         if not llm_model.exists():
             self.log(f"LLM model not found at {llm_model}", "error")

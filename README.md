@@ -12,10 +12,18 @@ Desktop application for extracting conversations from audio files and formatting
 
 ## Requirements
 
-- Windows 10/11
+**Windows 10/11**
 - NVIDIA GPU with CUDA support (for accelerated inference)
 - Python 3.8+
 - ~15GB free disk space for models and binaries
+
+**macOS (Apple Silicon M1+ or Intel x86_64)**
+- Python 3.8+
+- Xcode Command Line Tools or `cmake` and `git` available in PATH
+  - Install via: `xcode-select --install`
+  - Or via Homebrew: `brew install cmake git`
+- ~15GB free disk space for models and binaries
+- Note: whisper.cpp is compiled from source automatically on first run (~2–5 minutes)
 
 ## Installation
 
@@ -31,9 +39,11 @@ uv sync
 uv run app.py
 ```
 
-The application will automatically download the required binaries and models on first run:
+The application will automatically set up the required binaries and models on first run:
 - **whisper.cpp** (v1.8.4) - for audio transcription
-- **llama.cpp** (b8468) - for LLM inference
+  - Windows: downloaded as a prebuilt binary
+  - macOS: compiled from source (requires `cmake` and `git`)
+- **llama.cpp** (b8468) - for LLM inference (prebuilt binary on all platforms)
 - **Qwen3.5-9B-Q4_K_M.gguf** - LLM model for summarization (~5GB)
 - **ggml-medium.bin** - Whisper model for transcription (~700MB)
 
@@ -104,10 +114,18 @@ This project uses open-source components:
 
 ## Требования
 
-- Windows 10/11
+**Windows 10/11**
 - GPU NVIDIA с поддержкой CUDA (для ускорения инференса)
 - Python 3.8+
 - ~15 ГБ свободного места на диске для моделей и бинарников
+
+**macOS (Apple Silicon M1+ или Intel x86_64)**
+- Python 3.8+
+- Xcode Command Line Tools или `cmake` и `git` в PATH
+  - Установка: `xcode-select --install`
+  - Или через Homebrew: `brew install cmake git`
+- ~15 ГБ свободного места на диске для моделей и бинарников
+- Примечание: whisper.cpp компилируется из исходников автоматически при первом запуске (~2–5 минут)
 
 ## Установка
 
@@ -123,9 +141,11 @@ uv sync
 uv run app.py
 ```
 
-Приложение автоматически загрузит необходимые бинарники и модели при первом запуске:
+Приложение автоматически настроит необходимые бинарники и модели при первом запуске:
 - **whisper.cpp** (v1.8.4) — для расшифровки аудио
-- **llama.cpp** (b8468) — для инференса LLM
+  - Windows: загружается как готовый бинарник
+  - macOS: компилируется из исходников (требуются `cmake` и `git`)
+- **llama.cpp** (b8468) — для инференса LLM (готовый бинарник на всех платформах)
 - **Qwen3.5-9B-Q4_K_M.gguf** — модель LLM для резюмирования (~5 ГБ)
 - **ggml-medium.bin** — модель Whisper для расшифровки (~700 МБ)
 
