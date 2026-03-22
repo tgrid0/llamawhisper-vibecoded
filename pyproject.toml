@@ -1,0 +1,6 @@
+[project]
+name = "llamawhisper"
+version = "0.1.0"
+description = "GUI for managing whisper.cpp and llama.cpp installations"
+requires-python = ">=3.8"
+dependencies = []
