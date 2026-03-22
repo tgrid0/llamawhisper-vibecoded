@@ -7,7 +7,18 @@ import threading
 import subprocess
 import queue
 from pathlib import Path
-from tkinter import Tk, Frame, Label, Button, StringVar, ttk, filedialog, Text, END
+from tkinter import (
+    Tk,
+    Frame,
+    Label,
+    Button,
+    StringVar,
+    ttk,
+    filedialog,
+    Text,
+    END,
+    Entry,
+)
 
 APP_DIR = Path(__file__).parent
 CONFIG_FILE = APP_DIR / "config.json"
@@ -392,6 +403,17 @@ class StatusApp:
             audio_frame, text="Choose audio", command=self.choose_audio_file, width=12
         ).pack(side="right", padx=5)
 
+        Label(self.main_frame, text="", height=1).pack()
+
+        lang_frame = Frame(self.main_frame)
+        lang_frame.pack(fill="x", pady=5)
+        Label(lang_frame, text="Language:", width=10).pack(side="left")
+        self.language_var = StringVar(value="ru")
+        self.language_entry = Entry(
+            lang_frame, textvariable=self.language_var, width=10
+        )
+        self.language_entry.pack(side="left", padx=5)
+
         self.transcribe_button = Button(
             self.main_frame, text="Transcribe", command=self.transcribe, width=15
         )
@@ -489,12 +511,15 @@ class StatusApp:
             return
 
         self.log(f"Starting transcription of {audio_file}")
+        language = self.language_var.get().strip()
+        if not language:
+            language = "ru"
         cmd = [
             str(whisper_exe),
             "-m",
             str(whisper_model),
             "-l",
-            "ru",
+            language,
             "-f",
             audio_file,
             "-otxt",
