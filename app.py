@@ -6,7 +6,50 @@ import shutil
 import threading
 import subprocess
 import queue
+import torchaudio
 from pathlib import Path
+
+# torchaudio 2.x removed several APIs that pyannote still depends on.
+# Patch them back in before pyannote is ever imported.
+if not hasattr(torchaudio, "AudioMetaData"):
+    from dataclasses import dataclass
+
+    @dataclass
+    class _AudioMetaData:
+        sample_rate: int
+        num_frames: int
+        num_channels: int
+        bits_per_sample: int
+        encoding: str
+
+    torchaudio.AudioMetaData = _AudioMetaData
+
+if not hasattr(torchaudio, "list_audio_backends"):
+    torchaudio.list_audio_backends = lambda: ["soundfile"]
+
+# PyTorch 2.6 changed torch.load default to weights_only=True, breaking pyannote
+# checkpoints that contain arbitrary globals (TorchVersion, etc.).
+# Restore the pre-2.6 behaviour for calls that don't set weights_only explicitly.
+import torch
+_orig_torch_load = torch.load
+def _patched_torch_load(*args, **kwargs):
+    # Lightning passes weights_only=None; PyTorch 2.6 treats None as True.
+    # Only leave it alone if the caller explicitly requested True.
+    if kwargs.get("weights_only") is not True:
+        kwargs["weights_only"] = False
+    return _orig_torch_load(*args, **kwargs)
+torch.load = _patched_torch_load
+
+# huggingface_hub 0.24+ removed use_auth_token in favour of token; pyannote 3.x still
+# passes use_auth_token.  Wrap hf_hub_download before pyannote imports it.
+import huggingface_hub as _hf_hub
+_orig_hf_hub_download = _hf_hub.hf_hub_download
+def _patched_hf_hub_download(*args, **kwargs):
+    if "use_auth_token" in kwargs:
+        kwargs.setdefault("token", kwargs.pop("use_auth_token"))
+    return _orig_hf_hub_download(*args, **kwargs)
+_hf_hub.hf_hub_download = _patched_hf_hub_download
+
 from tkinter import (
     Tk,
     Frame,
@@ -18,6 +61,8 @@ from tkinter import (
     Text,
     END,
     Entry,
+    Toplevel,
+    messagebox,
 )
 
 APP_DIR = Path(__file__).parent
@@ -45,14 +90,104 @@ DEFAULT_CONFIG = {
             "display_name": "ggerganov/whisper.cpp",
         },
     },
+    "hf_token": "",
 }
+
+
+class SpeakerNamingDialog:
+    """
+    Modal tabbed dialog for assigning human names to detected speakers.
+    One tab per speaker, each with a name Entry field pre-filled with the raw ID.
+
+    Usage:
+        dlg = SpeakerNamingDialog(parent, ["SPEAKER_00", "SPEAKER_01"])
+        names = dlg.get_names()
+        # {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"}
+    """
+
+    def __init__(self, parent, speakers: list, speaker_texts: dict = None):
+        self._names: dict = {}
+        self._entries: dict = {}
+        self._build_ui(parent, speakers, speaker_texts or {})
+
+    def _build_ui(self, parent, speakers, speaker_texts: dict):
+        self.top = Toplevel(parent)
+        self.top.title("Name the Speakers")
+        self.top.resizable(True, True)
+        self.top.grab_set()
+        self.top.focus_set()
+
+        Label(
+            self.top,
+            text="Enter a name for each speaker, then click Confirm.",
+            font=("Arial", 10),
+            pady=8,
+        ).pack()
+
+        notebook = ttk.Notebook(self.top)
+        notebook.pack(fill="both", expand=True, padx=10, pady=5)
+
+        for i, speaker in enumerate(speakers):
+            tab = Frame(notebook)
+            notebook.add(tab, text=f"Speaker {i + 1}")
+
+            Label(tab, text=f"Speaker ID: {speaker}", font=("Arial", 9, "italic"), fg="#666", pady=8).pack()
+            Label(tab, text="Display name:").pack()
+
+            var = StringVar(value=speaker)
+            Entry(tab, textvariable=var, width=30).pack(pady=5)
+            self._entries[speaker] = var
+
+            lines = speaker_texts.get(speaker, [])
+            if lines:
+                Label(tab, text="Transcribed text:", anchor="w").pack(fill="x", padx=10)
+                text_frame = Frame(tab)
+                text_frame.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+                scrollbar = ttk.Scrollbar(text_frame, orient="vertical")
+                scrollbar.pack(side="right", fill="y")
+                txt = Text(
+                    text_frame,
+                    height=12,
+                    wrap="word",
+                    yscrollcommand=scrollbar.set,
+                    state="normal",
+                )
+                txt.pack(side="left", fill="both", expand=True)
+                scrollbar.config(command=txt.yview)
+                txt.insert(END, "\n".join(lines))
+                txt.config(state="disabled")
+
+        btn_frame = Frame(self.top)
+        btn_frame.pack(pady=10)
+        Button(btn_frame, text="Confirm Names", command=self._on_confirm, width=14).pack()
+
+        self.top.update_idletasks()
+        pw = parent.winfo_width()
+        ph = parent.winfo_height()
+        px = parent.winfo_x()
+        py = parent.winfo_y()
+        dw = max(self.top.winfo_reqwidth(), 500)
+        dh = max(self.top.winfo_reqheight(), 420)
+        self.top.geometry(f"{dw}x{dh}+{px + (pw - dw) // 2}+{py + (ph - dh) // 2}")
+
+        self.top.protocol("WM_DELETE_WINDOW", self._on_confirm)
+
+    def _on_confirm(self):
+        for speaker, var in self._entries.items():
+            self._names[speaker] = var.get().strip() or speaker
+        self.top.destroy()
+
+    def get_names(self) -> dict:
+        """Blocks (via nested event loop) until the dialog is closed."""
+        self.top.wait_window()
+        return self._names
 
 
 class StatusApp:
     def __init__(self, root):
         self.root = root
         self.root.title("LlamaWhisper Setup")
-        self.root.geometry("700x550")
+        self.root.geometry("700x600")
         self.root.resizable(False, False)
 
         self.config = self.load_or_create_config()
@@ -82,6 +217,11 @@ class StatusApp:
 
         self.whisper_exe_dir = WHISPER_DIR / self.whisper_config["version"]
         self.llamacpp_exe_dir = LLAMACPP_DIR / self.llamacpp_config["version"]
+
+        self.diarize_pipeline = None
+        self.transcribe_process = None
+        self.summarize_process = None
+        self._transcribe_cancelled = False
 
     def create_status_screen(self):
         self.status_frame = Frame(self.root)
@@ -414,8 +554,22 @@ class StatusApp:
         )
         self.language_entry.pack(side="left", padx=5)
 
+        hf_frame = Frame(self.main_frame)
+        hf_frame.pack(fill="x", pady=5)
+        Label(hf_frame, text="HF Token:", width=10).pack(side="left")
+        self.hf_token_var = StringVar(value=self.config.get("hf_token", ""))
+        Entry(hf_frame, textvariable=self.hf_token_var, width=40, show="*").pack(
+            side="left", padx=5
+        )
+        Button(hf_frame, text="Save", command=self._save_hf_token, width=6).pack(
+            side="left"
+        )
+
         self.transcribe_button = Button(
-            self.main_frame, text="Transcribe", command=self.transcribe, width=15
+            self.main_frame,
+            text="Diarize & Transcribe",
+            command=self.transcribe,
+            width=20,
         )
         self.transcribe_button.pack(pady=5)
 
@@ -444,6 +598,12 @@ class StatusApp:
         self.output_text.tag_configure("info", foreground="blue")
         self.output_text.tag_configure("error", foreground="red")
         self.output_text.tag_configure("success", foreground="green")
+
+    def _save_hf_token(self):
+        self.config["hf_token"] = self.hf_token_var.get().strip()
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(self.config, f, indent=2)
+        self.log("HF token saved.", "success")
 
     def log(self, message, tag="info"):
         self.output_text.insert(END, message + "\n", tag)
@@ -500,6 +660,14 @@ class StatusApp:
             self.log("Please select an audio file first", "error")
             return
 
+        hf_token = self.hf_token_var.get().strip()
+        if not hf_token:
+            self.log(
+                "Hugging Face token is required for diarization. Enter it in the HF Token field and click Save.",
+                "error",
+            )
+            return
+
         whisper_exe = self.whisper_exe_dir / "whisper-cli.exe"
         whisper_model = MODELS_DIR / self.whisper_model_config["name"]
 
@@ -510,66 +678,272 @@ class StatusApp:
             self.log(f"Whisper model not found at {whisper_model}", "error")
             return
 
-        self.log(f"Starting transcription of {audio_file}")
-        language = self.language_var.get().strip()
-        if not language:
-            language = "ru"
+        language = self.language_var.get().strip() or "ru"
+        self._transcribe_cancelled = False
+        self.transcribe_button.config(text="Cancel")
+
+        t = threading.Thread(
+            target=self._run_diarization_and_transcribe,
+            args=(audio_file, hf_token, str(whisper_exe), str(whisper_model), language),
+            daemon=True,
+        )
+        t.start()
+
+    def _run_diarization_and_transcribe(
+        self, audio_file, hf_token, whisper_exe, whisper_model, language
+    ):
+        def ui(fn):
+            self.root.after(0, fn)
+
+        def log(msg, tag="info"):
+            ui(lambda m=msg, t=tag: self.log(m, t))
+
+        try:
+            # Stage 1: Diarization
+            log("Loading diarization pipeline (first run may take a minute)...")
+            diarize_segs = self.diarize_audio(audio_file, hf_token)
+
+            if self._transcribe_cancelled:
+                return
+
+            speaker_count = len(set(s[2] for s in diarize_segs))
+            log(f"Diarization complete: {speaker_count} speaker(s) detected.")
+
+            # Stage 2: Whisper JSON transcription
+            log("Running Whisper transcription...")
+            json_path = self.run_whisper_json(
+                audio_file, whisper_exe, whisper_model, language
+            )
+
+            if self._transcribe_cancelled:
+                return
+
+            if json_path is None:
+                log("Whisper transcription failed.", "error")
+                ui(lambda: self.transcribe_button.config(text="Diarize & Transcribe"))
+                return
+
+            # Stage 3: Parse whisper JSON
+            whisper_segs = self.parse_whisper_json(json_path)
+            log(f"Parsed {len(whisper_segs)} transcript segment(s).")
+
+            # Stage 4: Align speakers to transcript segments
+            aligned = self.align_speakers(whisper_segs, diarize_segs)
+
+            # Stage 5: Speaker naming dialog (must run on main thread)
+            speakers = sorted(set(item[1] for item in aligned))
+            speaker_texts = {}
+            for _, spk, txt in aligned:
+                speaker_texts.setdefault(spk, []).append(txt)
+            name_result = {}
+            dialog_done = threading.Event()
+
+            def show_dialog(spk_texts=speaker_texts):
+                dlg = SpeakerNamingDialog(self.root, speakers, spk_texts)
+                name_result.update(dlg.get_names())
+                dialog_done.set()
+
+            ui(show_dialog)
+            dialog_done.wait()
+
+            if self._transcribe_cancelled:
+                return
+
+            # Stage 6: Write stitched transcript
+            transcript_path = self.write_transcript(audio_file, aligned, name_result)
+            log(f"Transcript saved to {transcript_path}", "success")
+
+            # Stage 7: Auto-populate text field and reset button
+            def finish():
+                self.text_file_var.set(transcript_path)
+                self.transcribe_button.config(text="Diarize & Transcribe")
+                self.log("Ready to summarize.", "success")
+
+            ui(finish)
+
+        except Exception as e:
+            def report(err=e):
+                self.log(f"Error: {err}", "error")
+                self.transcribe_button.config(text="Diarize & Transcribe")
+
+            ui(report)
+
+    def diarize_audio(self, audio_file: str, hf_token: str) -> list:
+        """
+        Returns [(start_sec, end_sec, speaker_label), ...].
+
+        Loads audio via soundfile + ffmpeg (bypasses torchcodec entirely,
+        avoiding DLL issues on Windows).
+        """
+        import tempfile
+
+        try:
+            from static_ffmpeg import run as ffmpeg_run
+            ffmpeg_exe, _ = ffmpeg_run.get_or_fetch_platform_executables_else_raise()
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to locate bundled ffmpeg: {e}. Run: uv add static-ffmpeg"
+            )
+
+        try:
+            import soundfile as sf
+            import torch
+            import numpy as np
+            from pyannote.audio import Pipeline
+        except ImportError as e:
+            raise ImportError(f"Missing dependency: {e}. Run: uv sync")
+
+        if self.diarize_pipeline is None:
+            self.diarize_pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                use_auth_token=hf_token,
+            )
+
+        # Formats soundfile can't read natively — convert to WAV first.
+        # This also completely avoids torchcodec's ffmpeg DLL requirement on Windows.
+        needs_conversion = Path(audio_file).suffix.lower() in (
+            ".mp3", ".m4a", ".aac", ".ogg", ".opus"
+        )
+        tmp_wav = None
+        try:
+            if needs_conversion:
+                tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                tmp_wav = tmp.name
+                tmp.close()
+                subprocess.run(
+                    [ffmpeg_exe, "-i", audio_file, "-ar", "16000", "-ac", "1", "-y", tmp_wav],
+                    check=True,
+                    capture_output=True,
+                )
+                load_path = tmp_wav
+            else:
+                load_path = audio_file
+
+            # Load with soundfile — no torchcodec, no DLL dependencies
+            data, sr = sf.read(load_path, dtype="float32", always_2d=True)
+            waveform = torch.from_numpy(data.T)  # [channels, samples]
+        finally:
+            if tmp_wav:
+                try:
+                    os.unlink(tmp_wav)
+                except Exception:
+                    pass
+
+        # Pass pre-loaded waveform so pyannote skips its own audio I/O entirely.
+        # pyannote 3.x returns the Annotation directly; 4.x wraps it in a
+        # DiarizeOutput dataclass with a .speaker_diarization attribute.
+        output = self.diarize_pipeline({"waveform": waveform, "sample_rate": sr})
+        annotation = getattr(output, "speaker_diarization", output)
+        return [
+            (turn.start, turn.end, speaker)
+            for turn, _, speaker in annotation.itertracks(yield_label=True)
+        ]
+
+    def run_whisper_json(
+        self, audio_file: str, whisper_exe: str, whisper_model: str, language: str
+    ):
+        """
+        Runs whisper-cli with -oj flag. Blocks until complete.
+        Returns path to the output JSON file, or None on failure.
+        """
         cmd = [
-            str(whisper_exe),
-            "-m",
-            str(whisper_model),
-            "-l",
-            language,
-            "-f",
-            audio_file,
-            "-otxt",
+            whisper_exe,
+            "-m", whisper_model,
+            "-l", language,
+            "-f", audio_file,
+            "-oj",
             "-pp",
         ]
 
-        def completion_callback():
-            self.transcribe_button.config(text="Transcribe")
-            self.log("Transcription complete", "success")
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        self.transcribe_process = process
 
-        try:
-            self.log(f"Running: {' '.join(cmd)}")
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
+        for line in iter(process.stdout.readline, ""):
+            stripped = line.strip()
+            if stripped:
+                self.root.after(0, lambda l=stripped: self.log(l))
+
+        process.wait()
+
+        if process.returncode != 0 and not self._transcribe_cancelled:
+            return None
+
+        json_path = audio_file + ".json"
+        return json_path if Path(json_path).exists() else None
+
+    def parse_whisper_json(self, json_path: str) -> list:
+        """Returns [(start_sec, end_sec, text), ...]."""
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        return [
+            (
+                entry["offsets"]["from"] / 1000.0,
+                entry["offsets"]["to"] / 1000.0,
+                entry["text"].strip(),
             )
-            self.transcribe_process = process
-            output_queue = queue.Queue()
-            read_thread = threading.Thread(
-                target=self.read_output, args=(process, output_queue), daemon=True
-            )
-            read_thread.start()
-            self.transcribe_button.config(text="Cancel")
-            self.root.after(
-                100,
-                lambda: self.process_output_queue(output_queue, completion_callback),
-            )
-        except Exception as e:
-            self.transcribe_button.config(text="Transcribe")
-            self.log(f"Error: {e}", "error")
+            for entry in data.get("transcription", [])
+            if entry.get("text", "").strip()
+        ]
+
+    def align_speakers(self, whisper_segs: list, diarize_segs: list) -> list:
+        """
+        Assigns each whisper segment to the diarization speaker with max overlap.
+        Returns [(start_sec, speaker_label, text), ...] sorted by start_sec.
+        """
+        result = []
+        for w_start, w_end, text in whisper_segs:
+            best_speaker = "SPEAKER_00"
+            best_overlap = 0.0
+            for d_start, d_end, speaker in diarize_segs:
+                overlap = max(0.0, min(w_end, d_end) - max(w_start, d_start))
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_speaker = speaker
+            result.append((w_start, best_speaker, text))
+
+        return sorted(result, key=lambda x: x[0])
+
+    def write_transcript(self, audio_file: str, aligned: list, name_map: dict) -> str:
+        """
+        Writes aligned segments to {audio_file}_transcript.txt.
+        Format: [Name M:SS]: text
+        Returns the output path.
+        """
+        output_path = str(Path(audio_file).with_suffix("")) + "_transcript.txt"
+        lines = []
+        for start_sec, speaker, text in aligned:
+            name = name_map.get(speaker, speaker)
+            minutes = int(start_sec) // 60
+            seconds = int(start_sec) % 60
+            lines.append(f"[{name} {minutes}:{seconds:02d}]: {text}")
+
+        Path(output_path).write_text("\n".join(lines), encoding="utf-8")
+        return output_path
 
     def cancel_transcribe(self):
+        self._transcribe_cancelled = True
         if self.transcribe_process:
             self.log("Cancelling transcription...")
             try:
                 self.transcribe_process.terminate()
                 self.transcribe_process.wait(timeout=5)
-            except:
+            except Exception:
                 try:
                     self.transcribe_process.kill()
-                except:
+                except Exception:
                     pass
             self.transcribe_process = None
-            self.transcribe_button.config(text="Transcribe")
-            self.log("Transcription cancelled", "error")
+        self.transcribe_button.config(text="Diarize & Transcribe")
+        self.log("Transcription cancelled", "error")
 
     def summarize(self):
         if self.summarize_button.cget("text") == "Cancel":
@@ -593,7 +967,11 @@ class StatusApp:
 
         prompt_file = APP_DIR / "system-summary.txt"
         with open(prompt_file, "w", encoding="utf-8") as f:
-            f.write(f"Кратко изложи содержание этой стенограммы:\n")
+            f.write(
+                "Кратко изложи содержание этой стенограммы. "
+                "Стенограмма содержит реплики нескольких участников в формате "
+                "[Имя ЧЧ:ММ]: текст. Учитывай, кто что говорил.\n"
+            )
 
         self.log("Starting summarization")
         cmd = [
@@ -655,10 +1033,10 @@ class StatusApp:
             try:
                 self.summarize_process.terminate()
                 self.summarize_process.wait(timeout=5)
-            except:
+            except Exception:
                 try:
                     self.summarize_process.kill()
-                except:
+                except Exception:
                     pass
             self.summarize_process = None
             self.summarize_button.config(text="Summarize")
