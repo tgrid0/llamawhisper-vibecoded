@@ -705,7 +705,9 @@ class StatusApp:
 
         try:
             # Stage 1: Diarization
-            log("Loading diarization pipeline (first run may take a minute)...")
+            import torch as _torch
+            _device = "GPU (CUDA)" if _torch.cuda.is_available() else "CPU"
+            log(f"Loading diarization pipeline on {_device} (first run may take a minute)...")
             diarize_segs = self.diarize_audio(audio_file, hf_token)
 
             if self._transcribe_cancelled:
@@ -799,10 +801,11 @@ class StatusApp:
             raise ImportError(f"Missing dependency: {e}. Run: uv sync")
 
         if self.diarize_pipeline is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.diarize_pipeline = Pipeline.from_pretrained(
                 "pyannote/speaker-diarization-3.1",
                 use_auth_token=hf_token,
-            )
+            ).to(device)
 
         # Formats soundfile can't read natively — convert to WAV first.
         # This also completely avoids torchcodec's ffmpeg DLL requirement on Windows.
