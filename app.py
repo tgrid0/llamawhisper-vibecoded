@@ -96,21 +96,22 @@ DEFAULT_CONFIG = {
 
 class SpeakerNamingDialog:
     """
-    Modal tabbed dialog for assigning human names to detected speakers.
-    One tab per speaker, each with a name Entry field pre-filled with the raw ID.
+    Modal dialog for assigning human names to detected speakers.
+    All name fields are shown at once; a single scrollable text box
+    displays the full transcript with timestamps and placeholder IDs.
 
     Usage:
-        dlg = SpeakerNamingDialog(parent, ["SPEAKER_00", "SPEAKER_01"])
+        dlg = SpeakerNamingDialog(parent, ["SPEAKER_00", "SPEAKER_01"], aligned=aligned)
         names = dlg.get_names()
         # {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"}
     """
 
-    def __init__(self, parent, speakers: list, speaker_texts: dict = None):
+    def __init__(self, parent, speakers: list, speaker_texts: dict = None, aligned: list = None):
         self._names: dict = {}
         self._entries: dict = {}
-        self._build_ui(parent, speakers, speaker_texts or {})
+        self._build_ui(parent, speakers, aligned or [], speaker_texts or {})
 
-    def _build_ui(self, parent, speakers, speaker_texts: dict):
+    def _build_ui(self, parent, speakers, aligned: list, speaker_texts: dict):
         self.top = Toplevel(parent)
         self.top.title("Name the Speakers")
         self.top.resizable(True, True)
@@ -124,38 +125,42 @@ class SpeakerNamingDialog:
             pady=8,
         ).pack()
 
-        notebook = ttk.Notebook(self.top)
-        notebook.pack(fill="both", expand=True, padx=10, pady=5)
-
+        # All speaker name fields visible at once
+        names_frame = Frame(self.top, bd=1, relief="groove")
+        names_frame.pack(fill="x", padx=10, pady=(0, 8))
+        Label(names_frame, text="Speaker Names", font=("Arial", 10, "bold"), anchor="w", pady=4, padx=6).pack(fill="x")
         for i, speaker in enumerate(speakers):
-            tab = Frame(notebook)
-            notebook.add(tab, text=f"Speaker {i + 1}")
-
-            Label(tab, text=f"Speaker ID: {speaker}", font=("Arial", 9, "italic"), fg="#666", pady=8).pack()
-            Label(tab, text="Display name:").pack()
-
+            row = Frame(names_frame)
+            row.pack(fill="x", padx=6, pady=2)
+            Label(row, text=f"Speaker {i + 1} ({speaker}):", width=26, anchor="w").pack(side="left")
             var = StringVar(value=speaker)
-            Entry(tab, textvariable=var, width=30).pack(pady=5)
+            Entry(row, textvariable=var, width=28).pack(side="left", padx=4)
             self._entries[speaker] = var
 
-            lines = speaker_texts.get(speaker, [])
-            if lines:
-                Label(tab, text="Transcribed text:", anchor="w").pack(fill="x", padx=10)
-                text_frame = Frame(tab)
-                text_frame.pack(fill="both", expand=True, padx=10, pady=(0, 8))
-                scrollbar = ttk.Scrollbar(text_frame, orient="vertical")
-                scrollbar.pack(side="right", fill="y")
-                txt = Text(
-                    text_frame,
-                    height=12,
-                    wrap="word",
-                    yscrollcommand=scrollbar.set,
-                    state="normal",
-                )
-                txt.pack(side="left", fill="both", expand=True)
-                scrollbar.config(command=txt.yview)
-                txt.insert(END, "\n".join(lines))
-                txt.config(state="disabled")
+        # Full transcript in a single scrollable text box
+        Label(self.top, text="Full transcript:", font=("Arial", 10, "bold"), anchor="w", padx=10).pack(fill="x")
+        text_frame = Frame(self.top)
+        text_frame.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+        txt = Text(text_frame, wrap="word", yscrollcommand=scrollbar.set, state="normal")
+        txt.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=txt.yview)
+
+        if aligned:
+            lines = []
+            for start_sec, speaker, text in aligned:
+                minutes = int(start_sec) // 60
+                seconds = int(start_sec) % 60
+                lines.append(f"[{speaker} {minutes}:{seconds:02d}]: {text}")
+            txt.insert(END, "\n".join(lines))
+        elif speaker_texts:
+            lines = []
+            for spk, texts in speaker_texts.items():
+                for t in texts:
+                    lines.append(f"[{spk}]: {t}")
+            txt.insert(END, "\n".join(lines))
+        txt.config(state="disabled")
 
         btn_frame = Frame(self.top)
         btn_frame.pack(pady=10)
@@ -166,8 +171,8 @@ class SpeakerNamingDialog:
         ph = parent.winfo_height()
         px = parent.winfo_x()
         py = parent.winfo_y()
-        dw = max(self.top.winfo_reqwidth(), 500)
-        dh = max(self.top.winfo_reqheight(), 420)
+        dw = max(self.top.winfo_reqwidth(), 600)
+        dh = max(self.top.winfo_reqheight(), 520)
         self.top.geometry(f"{dw}x{dh}+{px + (pw - dw) // 2}+{py + (ph - dh) // 2}")
 
         self.top.protocol("WM_DELETE_WINDOW", self._on_confirm)
@@ -738,8 +743,8 @@ class StatusApp:
             name_result = {}
             dialog_done = threading.Event()
 
-            def show_dialog(spk_texts=speaker_texts):
-                dlg = SpeakerNamingDialog(self.root, speakers, spk_texts)
+            def show_dialog(spk_texts=speaker_texts, al=aligned):
+                dlg = SpeakerNamingDialog(self.root, speakers, spk_texts, al)
                 name_result.update(dlg.get_names())
                 dialog_done.set()
 
